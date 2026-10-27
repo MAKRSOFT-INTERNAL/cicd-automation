@@ -1,6 +1,6 @@
 services:
   nginx:
-    image: cicd-automation-nginx:latest
+    image: cicd-automation-nginx:${IMAGE_TAG:-latest}
     build:
       context: .
       dockerfile: Dockerfile
