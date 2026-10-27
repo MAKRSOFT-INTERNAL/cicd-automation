@@ -1,8 +1,9 @@
 name: Docker
 
 on:
-  pull_request:
   push:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -10,11 +11,15 @@ permissions:
 
 jobs:
   nginx:
-    name: Build and smoke test Nginx
-    runs-on: ubuntu-latest
+    name: Build and smoke test Nginx on ephemeral runner
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, linux, x64, docker-agent]
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Prepare job logs
+        run: mkdir -p runner-logs
 
       - name: Set short image tag
         id: image-tag
@@ -23,14 +28,17 @@ jobs:
       - name: Build Nginx image
         env:
           IMAGE_TAG: ${{ steps.image-tag.outputs.tag }}
-        run: docker compose -f docker-compose.yml build
+        run: |
+          set -o pipefail
+          docker compose -f docker-compose.yml build 2>&1 | tee runner-logs/build.log
 
       - name: Package image
         env:
           IMAGE_TAG: ${{ steps.image-tag.outputs.tag }}
         run: |
           mkdir -p DockerImages
-          docker save --output "DockerImages/nginx-${IMAGE_TAG}.tar" "cicd-automation-nginx:${IMAGE_TAG}"
+          set -o pipefail
+          docker save --output "DockerImages/nginx-${IMAGE_TAG}.tar" "cicd-automation-nginx:${IMAGE_TAG}" 2>&1 | tee runner-logs/package.log
 
       - name: Upload image package
         uses: actions/upload-artifact@v4
@@ -43,26 +51,47 @@ jobs:
       - name: Start Nginx
         env:
           IMAGE_TAG: ${{ steps.image-tag.outputs.tag }}
-        run: docker compose -f docker-compose.yml up --detach
+        run: |
+          set -o pipefail
+          docker compose -f docker-compose.yml up --detach 2>&1 | tee runner-logs/start.log
 
       - name: Check welcome page
-        run: curl --fail --retry 10 --retry-all-errors --retry-delay 1 http://localhost:8080/ | grep --fixed-strings --quiet "Welcome to MAKRSOFT IT SOLUTIONS"
+        run: |
+          set -o pipefail
+          curl --fail --retry 10 --retry-all-errors --retry-delay 1 --output runner-logs/response.html --write-out 'HTTP %{http_code}\n' http://localhost:8080/ 2>&1 | tee runner-logs/smoke-test.log
+          grep --fixed-strings --quiet "Welcome to MAKRSOFT IT SOLUTIONS" runner-logs/response.html
 
       - name: Stop Nginx
         if: always()
-        run: docker compose -f docker-compose.yml down --remove-orphans
+        run: |
+          mkdir -p runner-logs
+          docker compose -f docker-compose.yml logs --no-color nginx > runner-logs/nginx.log 2>&1 || true
+          set -o pipefail
+          docker compose -f docker-compose.yml down --remove-orphans 2>&1 | tee runner-logs/stop.log
 
       - name: Commit image archive to branch
         if: github.ref_type == 'branch' && github.event_name != 'pull_request'
         env:
           IMAGE_TAG: ${{ steps.image-tag.outputs.tag }}
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "DockerImages/nginx-${IMAGE_TAG}.tar"
-          if git diff --cached --quiet; then
-            echo "Image archive is already committed."
-            exit 0
-          fi
-          git commit -m "Update Nginx image archive [skip ci]"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
+          set -o pipefail
+          {
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add "DockerImages/nginx-${IMAGE_TAG}.tar"
+            if git diff --cached --quiet; then
+              echo "Image archive is already committed."
+              exit 0
+            fi
+            git commit -m "Update Nginx image archive [skip ci]"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          } 2>&1 | tee -a runner-logs/repository-push.log
+
+      - name: Upload job logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-job-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: runner-logs/
+          if-no-files-found: warn
+          retention-days: 30

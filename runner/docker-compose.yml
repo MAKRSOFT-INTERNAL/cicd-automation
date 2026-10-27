@@ -1,0 +1,16 @@
+services:
+  runner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: makrsoft-ephemeral-runner
+    init: true
+    restart: "no"
+    environment:
+      REPO_URL: ${REPO_URL:?Set REPO_URL in runner/.env}
+      RUNNER_TOKEN: ${RUNNER_TOKEN:?Set RUNNER_TOKEN in runner/.env}
+      RUNNER_NAME: ${RUNNER_NAME:-docker-ephemeral}
+      RUNNER_LABELS: ${RUNNER_LABELS:-docker-agent}
+      RUNNER_ALLOW_RUNASROOT: "1"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

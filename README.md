@@ -13,4 +13,16 @@ Open `http://localhost:8080` to see the welcome page. Stop the server with `Ctrl
 
 ## CI workflow
 
-The Docker workflow runs on pushes, pull requests, and manual dispatch. It tags each image with the first 12 characters of the triggering commit SHA, packages it as `DockerImages/nginx-<short-sha>.tar`, uploads that tarball as an Actions artifact, and verifies that the served page contains `Welcome to MAKRSOFT IT SOLUTIONS`. After a successful build and smoke test, push and manual runs commit the SHA-tagged archive to their branch. Pull request runs upload an artifact without trying to write to the branch; download it from the completed workflow run.
+The Docker workflow runs on pushes to `main` and manual dispatches on `main`, using the self-hosted runner labeled `docker-agent`. It tags each image with the first 12 characters of the triggering commit SHA, packages it as `DockerImages/nginx-<short-sha>.tar`, uploads the image and job logs as Actions artifacts, verifies the welcome page, stops Nginx, and commits the image archive to `main`.
+
+## Self-hosted runner
+
+Create a repository runner registration token in GitHub under **Settings > Actions > Runners > New self-hosted runner**. Copy `runner/.env.example` to `runner/.env`, set the repository URL and token, then start the one-job runner before triggering the workflow:
+
+```sh
+cp runner/.env.example runner/.env
+# Edit runner/.env and set RUNNER_TOKEN to the registration token.
+bash runner/run-once.sh
+```
+
+The script waits for one workflow job, then removes the ephemeral runner container. The workflow stops the Nginx container even if its smoke test fails. Download console/build logs from the job's `docker-job-logs` artifact; logs are not committed to Git. The runner mounts `/var/run/docker.sock`, which grants it control of the Docker host. Use it only on a trusted, isolated machine and do not run untrusted pull-request code on this runner. The registration token is short-lived; never commit `runner/.env`.
