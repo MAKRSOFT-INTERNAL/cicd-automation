@@ -1,5 +1,15 @@
-# cicd-automation
+# MAKRSOFT IT SOLUTIONS Nginx
 
-## Terraform workflow
+## Run locally
 
-The GitHub Actions workflow runs on pushes, pull requests, and manual dispatch. It checks Terraform formatting across the repository, then initializes and validates the `modules/ec2-vpc` module without configuring a backend or accessing AWS. It does not create or modify infrastructure; deployment requires a separate root configuration and AWS credentials.
+Build and start the Nginx server with:
+
+```sh
+docker compose -f docker-compose.yml up --build
+```
+
+Open `http://localhost:8080` to see the welcome page. Stop the server with `Ctrl+C`, or run `docker compose -f docker-compose.yml down`.
+
+## CI workflow
+
+The Docker workflow runs on pushes, pull requests, and manual dispatch. It builds the image, packages it as `DockerImages/nginx.tar`, uploads the tarball as an Actions artifact, and verifies that the served page contains `Welcome to MAKRSOFT IT SOLUTIONS`. Download the artifact from the completed workflow run; generated image archives are not committed to the repository.

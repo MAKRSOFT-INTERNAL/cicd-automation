@@ -1,0 +1,9 @@
+services:
+  nginx:
+    image: cicd-automation-nginx:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:80"
+    restart: unless-stopped
