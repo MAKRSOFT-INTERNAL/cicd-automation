@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   nginx:
@@ -41,3 +41,16 @@ jobs:
       - name: Stop Nginx
         if: always()
         run: docker compose -f docker-compose.yml down --remove-orphans
+
+      - name: Commit image archive to branch
+        if: github.ref_type == 'branch' && github.event_name != 'pull_request'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add DockerImages/nginx.tar
+          if git diff --cached --quiet; then
+            echo "Image archive is unchanged."
+            exit 0
+          fi
+          git commit -m "Update Nginx image archive [skip ci]"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
