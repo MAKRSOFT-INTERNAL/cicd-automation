@@ -1,0 +1,34 @@
+name: Terraform
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Format and validate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: modules/ec2-vpc
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.5.7
+
+      - name: Check formatting
+        run: terraform fmt -check -recursive ../..
+
+      - name: Initialize module
+        run: terraform init -backend=false -input=false
+
+      - name: Validate module
+        run: terraform validate -no-color
