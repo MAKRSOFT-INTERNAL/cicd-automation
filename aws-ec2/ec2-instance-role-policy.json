@@ -1,0 +1,20 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadRunnerRegistrationToken",
+      "Effect": "Allow",
+      "Action": "ssm:GetParameter",
+      "Resource": "arn:aws:ssm:*:*:parameter/github/actions/runners/*"
+    },
+    {
+      "Sid": "UploadRunnerLogs",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:PutObjectAcl"
+      ],
+      "Resource": "__LOG_BUCKET_ARN__/github-runs/*"
+    }
+  ]
+}

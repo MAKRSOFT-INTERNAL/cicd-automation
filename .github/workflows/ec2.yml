@@ -1,0 +1,230 @@
+name: Ephemeral EC2 CI
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  AWS_LAUNCH_TEMPLATE: ${{ vars.AWS_LAUNCH_TEMPLATE }}
+  GITHUB_ORGANIZATION: MAKRSOFT-INTERNAL
+  LOG_BUCKET: ${{ vars.RUNNER_LOG_BUCKET }}
+
+jobs:
+  provision:
+    name: Provision EC2 runner
+    runs-on: ubuntu-latest
+    outputs:
+      instance_id: ${{ steps.launch.outputs.instance_id }}
+      parameter_name: ${{ steps.token.outputs.parameter_name }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_GITHUB_OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Create runner registration parameter
+        id: token
+        env:
+          GH_ORG_PAT: ${{ secrets.GH_ORG_PAT }}
+        run: |
+          set -euo pipefail
+
+          PARAMETER_NAME="/github/actions/runners/${GITHUB_RUN_ID}"
+          echo "parameter_name=${PARAMETER_NAME}" >> "$GITHUB_OUTPUT"
+
+          RESPONSE=$(curl --fail --retry 3 --location \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer ${GH_ORG_PAT}" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/orgs/${GITHUB_ORGANIZATION}/actions/runners/registration-token")
+
+          RUNNER_TOKEN=$(echo "$RESPONSE" | jq -r '.token')
+          test -n "$RUNNER_TOKEN" && test "$RUNNER_TOKEN" != "null"
+
+          aws ssm put-parameter \
+            --name "$PARAMETER_NAME" \
+            --type SecureString \
+            --overwrite \
+            --value "$RUNNER_TOKEN" \
+            --region "$AWS_REGION"
+
+      - name: Generate EC2 user data
+        env:
+          PARAMETER_NAME: ${{ steps.token.outputs.parameter_name }}
+        run: |
+          sed \
+            -e "s|__AWS_REGION__|${AWS_REGION}|g" \
+            -e "s|__REGISTRATION_PARAMETER__|${PARAMETER_NAME}|g" \
+            -e "s|__GITHUB_ORGANIZATION__|${GITHUB_ORGANIZATION}|g" \
+            aws-ec2/ec2-user-data.sh > aws-ec2/user-data.sh.generated
+
+      - name: Launch EC2 runner
+        id: launch
+        run: |
+          set -euo pipefail
+
+          INSTANCE_ID=$(aws ec2 run-instances \
+            --launch-template "Name=${AWS_LAUNCH_TEMPLATE}" \
+            --user-data "file://aws-ec2/user-data.sh.generated" \
+            --tag-specifications "ResourceType=instance,Tags=[
+              {Key=Name,Value=ephemeral-github-runner},
+              {Key=GitHubOrganization,Value=${GITHUB_ORGANIZATION}},
+              {Key=GitHubRunId,Value=${GITHUB_RUN_ID}},
+              {Key=RunnerLabel,Value=docker-agent}
+            ]" \
+            --region "$AWS_REGION" \
+            --query 'Instances[0].InstanceId' \
+            --output text)
+
+          echo "instance_id=${INSTANCE_ID}" >> "$GITHUB_OUTPUT"
+          aws ec2 wait instance-running \
+            --instance-ids "$INSTANCE_ID" \
+            --region "$AWS_REGION"
+
+      - name: Wait for runner registration
+        env:
+          GH_ORG_PAT: ${{ secrets.GH_ORG_PAT }}
+          INSTANCE_ID: ${{ steps.launch.outputs.instance_id }}
+        run: |
+          set -euo pipefail
+
+          for attempt in {1..60}; do
+            RESPONSE=$(curl --fail --retry 2 \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer ${GH_ORG_PAT}" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/orgs/${GITHUB_ORGANIZATION}/actions/runners")
+
+            if echo "$RESPONSE" | jq -e --arg runner_name "ec2-${INSTANCE_ID}" '
+              .runners[]
+              | select(.status == "online")
+              | select(.name == $runner_name)
+              | select(.labels[]?.name == "docker-agent")
+            ' >/dev/null; then
+              echo "EC2 runner is online: $INSTANCE_ID"
+              exit 0
+            fi
+
+            sleep 5
+          done
+
+          echo "EC2 runner did not register before timeout" >&2
+          exit 1
+
+  build:
+    name: Build and smoke test on EC2
+    needs: provision
+    runs-on: [self-hosted, linux, x64, docker-agent]
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Prepare runner logs
+        run: mkdir -p runner-logs
+
+      - name: Set image tag
+        id: image-tag
+        run: echo "tag=$(git rev-parse --short=12 "$GITHUB_SHA")" >> "$GITHUB_OUTPUT"
+
+      - name: Build image
+        env:
+          IMAGE_TAG: ${{ steps.image-tag.outputs.tag }}
+        run: |
+          set -o pipefail
+          docker compose -f docker-compose.yml build 2>&1 | tee runner-logs/build.log
+
+      - name: Start and smoke test
+        env:
+          IMAGE_TAG: ${{ steps.image-tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          docker compose -f docker-compose.yml up --detach 2>&1 | tee runner-logs/start.log
+          curl --fail --retry 10 --retry-all-errors --retry-delay 2 \
+            --output runner-logs/response.html \
+            --write-out 'HTTP %{http_code}\n' \
+            http://localhost:8080/ 2>&1 | tee runner-logs/smoke-test.log
+          grep --fixed-strings --quiet "Welcome to MAKRSOFT IT SOLUTIONS" runner-logs/response.html
+
+      - name: Package image
+        env:
+          IMAGE_TAG: ${{ steps.image-tag.outputs.tag }}
+        run: |
+          mkdir -p runner-artifacts
+          docker save --output "runner-artifacts/nginx-${IMAGE_TAG}.tar" "cicd-automation-nginx:${IMAGE_TAG}"
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nginx-image-${{ steps.image-tag.outputs.tag }}
+          path: runner-artifacts/nginx-${{ steps.image-tag.outputs.tag }}.tar
+          retention-days: 7
+
+      - name: Collect logs
+        if: always()
+        run: |
+          mkdir -p runner-logs
+          docker compose -f docker-compose.yml logs --no-color nginx > runner-logs/nginx.log 2>&1 || true
+          aws s3 sync runner-logs/ \
+            "s3://${LOG_BUCKET}/github-runs/${GITHUB_RUN_ID}/runner-logs/" \
+            --region "$AWS_REGION"
+          sudo aws s3 sync /opt/actions-runner/_diag/ \
+            "s3://${LOG_BUCKET}/github-runs/${GITHUB_RUN_ID}/runner-diagnostics/" \
+            --region "$AWS_REGION" || true
+
+      - name: Stop containers
+        if: always()
+        run: docker compose -f docker-compose.yml down --remove-orphans || true
+
+      - name: Upload workflow logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-job-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: runner-logs/
+          if-no-files-found: warn
+          retention-days: 30
+
+  cleanup:
+    name: Remove EC2 runner
+    needs: [provision, build]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_GITHUB_OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terminate runner and registration parameter
+        env:
+          INSTANCE_ID: ${{ needs.provision.outputs.instance_id }}
+          PARAMETER_NAME: ${{ needs.provision.outputs.parameter_name }}
+        run: |
+          if test -n "$INSTANCE_ID" && test "$INSTANCE_ID" != "null"; then
+            aws ec2 terminate-instances \
+              --instance-ids "$INSTANCE_ID" \
+              --region "$AWS_REGION"
+            aws ec2 wait instance-terminated \
+              --instance-ids "$INSTANCE_ID" \
+              --region "$AWS_REGION"
+          fi
+
+          if test -n "$PARAMETER_NAME"; then
+            aws ssm delete-parameter \
+              --name "$PARAMETER_NAME" \
+              --region "$AWS_REGION" || true
+          fi

@@ -1,0 +1,28 @@
+{
+  "ImageId": "ami-REPLACE_WITH_UBUNTU_24_04_AMI",
+  "InstanceType": "t3.medium",
+  "IamInstanceProfile": {
+    "Name": "makrsoft-github-runner-instance-profile"
+  },
+  "KeyName": "REPLACE_WITH_OPTIONAL_KEYPAIR",
+  "SecurityGroupIds": [
+    "sg-REPLACE_WITH_RUNNER_SECURITY_GROUP"
+  ],
+  "SubnetId": "subnet-REPLACE_WITH_PRIVATE_SUBNET",
+  "MetadataOptions": {
+    "HttpEndpoint": "enabled",
+    "HttpTokens": "required",
+    "HttpPutResponseHopLimit": 1
+  },
+  "TagSpecifications": [
+    {
+      "ResourceType": "instance",
+      "Tags": [
+        {
+          "Key": "ManagedBy",
+          "Value": "GitHubActions"
+        }
+      ]
+    }
+  ]
+}
